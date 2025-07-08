@@ -1,0 +1,181 @@
+// ===== НАСТРОЙКИ KILLFEED =====
+KillFeed_Settings = [
+    ["PositionX", 0.5],            // Позиция по X (0-1, 0.5 - центр)
+    ["PositionY", 0.05],           // Позиция по Y (0-1, 0.05 - 5% от верха)
+    ["Width", 0.5],                // Ширина блока (0-1)
+    ["Duration", 7],               // Длительность показа сообщения (сек)
+    ["FadeTime", 0.5],             // Время затухания перед исчезновением (сек)
+    ["FontSize", 1.1],             // Размер шрифта
+    ["Spacing", 0.04],             // Расстояние между сообщениями
+    ["Background", [0,0,0,0.5]],   // Цвет фона [R,G,B,A]
+    ["MaxMessages", 5],            // Максимальное количество сообщений
+    ["HeadshotEnabled", true],     // Включить подпись для хедшотов
+    ["HeadshotText", " <t color='#FF0000'>В БАШНЮ!</t>"]  // Текст хедшота
+];
+
+// Функция получения значения настройки
+KillFeed_GetSetting = {
+    params ["_name"];
+    private _setting = KillFeed_Settings select {_x#0 == _name};
+    if (count _setting > 0) then {_setting#0#1} else {nil};
+};
+
+// ===== ОСНОВНОЙ КОД =====
+// Массив для хранения текущих сообщений
+missionNamespace setVariable ["KillFeed_Messages", []];
+
+// Функция отображения killfeed'а
+KillFeed_Display = {
+    disableSerialization;
+    private _display = findDisplay 46;
+    if (isNull _display) exitWith {};
+    
+    // Удаляем старые контролы
+    {ctrlDelete _x} forEach (missionNamespace getVariable ["KillFeed_Controls", []]);
+    
+    private _controls = [];
+    private _messages = +missionNamespace getVariable ["KillFeed_Messages", []]; // Создаем копию массива
+    private _startY = "PositionY" call KillFeed_GetSetting;
+    private _spacing = "Spacing" call KillFeed_GetSetting;
+    private _duration = "Duration" call KillFeed_GetSetting;
+    private _fadeTime = "FadeTime" call KillFeed_GetSetting;
+    private _maxMessages = "MaxMessages" call KillFeed_GetSetting;
+    
+    // Ограничиваем количество сообщений
+    if (count _messages > _maxMessages) then {
+        _messages = _messages select [count _messages - _maxMessages, _maxMessages];
+    };
+    
+    {
+        _x params ["_message", "_time"];
+        private _age = time - _time;
+        
+        // Показываем только сообщения младше заданной длительности
+        if (_age < _duration) then {
+            private _ctrl = _display ctrlCreate ["RscStructuredText", -1];
+            
+            // Настройка позиции и размера
+            private _posX = safeZoneX + (safeZoneW * ("PositionX" call KillFeed_GetSetting)) - (safeZoneW * ("Width" call KillFeed_GetSetting))/2;
+            _ctrl ctrlSetPosition [
+                _posX,
+                _startY,
+                safeZoneW * ("Width" call KillFeed_GetSetting),
+                0.1
+            ];
+            
+            // Настройка текста
+            _ctrl ctrlSetStructuredText (parseText _message);
+            _ctrl ctrlSetBackgroundColor ("Background" call KillFeed_GetSetting);
+            
+            // Настройка плавного исчезновения
+            if (_age > _duration - _fadeTime) then {
+                _ctrl ctrlSetFade linearConversion [_duration - _fadeTime, _duration, _age, 0, 1];
+            } else {
+                _ctrl ctrlSetFade 0;
+            };
+            
+            _ctrl ctrlCommit 0;
+            
+            _controls pushBack _ctrl;
+            _startY = _startY + _spacing;
+        };
+    } forEach _messages;
+    
+    // Сохраняем контролы для последующего удаления
+    missionNamespace setVariable ["KillFeed_Controls", _controls];
+    
+    // Удаляем старые сообщения (исправлено - сохраняем только актуальные)
+    missionNamespace setVariable ["KillFeed_Messages", _messages select {time - (_x#1) < _duration}];
+};
+
+// Обработчик убийств (исправленная версия)
+addMissionEventHandler ["EntityKilled", {
+    params ["_killed", "_killer", "_instigator"];
+
+    // Определяем реального убийцу
+    private _realKiller = [_killer, _instigator] select (isPlayer _instigator);
+    if (isNull _realKiller || {!isPlayer _realKiller}) exitWith {};
+
+    // Получаем данные
+    private _killerName = name _realKiller;
+    
+    private _victimName = if (isPlayer _killed) then {
+        name _killed
+    } else {
+        private _cfg = configFile >> "CfgVehicles" >> typeOf _killed;
+        if (isText (_cfg >> "displayName")) then {
+            getText (_cfg >> "displayName")
+        } else {
+            typeOf _killed
+        }
+    };
+
+    // Определяем оружие правильно
+    private _weaponName = "";
+    if (_killer isKindOf "AllVehicles" && !(_killer isKindOf "Man")) then {
+        // Если убийца - техника
+        _weaponName = getText (configFile >> "CfgVehicles" >> typeOf _killer >> "displayName");
+    } else {
+        // Если убийца - человек
+        private _actualWeapon = currentWeapon _realKiller;
+        if (_actualWeapon != "") then {
+            _weaponName = getText (configFile >> "CfgWeapons" >> _actualWeapon >> "displayName");
+        } else {
+            _weaponName = "камнем по голове";
+        };
+    };
+
+    private _distance = round (_realKiller distance _killed);
+
+    // Проверка на хедшот (если включено в настройках)
+    private _headshotText = "";
+    if (["HeadshotEnabled"] call KillFeed_GetSetting) then {
+        private _isHeadshot = (_killed getHitIndex "head" > 0.9) || 
+                            (damage _killed > 0.9 && random 1 > 0.7);
+        if (_isHeadshot) then {
+            _headshotText = ["HeadshotText"] call KillFeed_GetSetting;
+        };
+    };
+
+    // Форматируем сообщение
+    private _message = format [
+        "<t size='%5' align='center'>" +
+        "<t color='#FF5555'>%1</t> " +  // Убийца
+        "<t color='#FFFFFF'>уничтожил</t> " + 
+        "<t color='#55FF55'>%2</t> " +  // Жертва
+        "<t color='#FFFFFF'>с помощью</t> " +
+        "<t color='#FFFF55'>%3</t> " +  // Оружие
+        "<t color='#FFFFFF'>с</t> " +
+        "<t color='#55AAFF'>%4м</t>" +  // Дистанция
+        "%6" +                         // Хедшот-текст
+        "</t>",
+        _killerName, 
+        _victimName, 
+        _weaponName, 
+        _distance, 
+        "FontSize" call KillFeed_GetSetting,
+        _headshotText
+    ];
+
+    // Добавляем сообщение в массив
+    private _messages = missionNamespace getVariable ["KillFeed_Messages", []];
+    _messages pushBack [_message, time];
+    missionNamespace setVariable ["KillFeed_Messages", _messages];
+    
+    // Дублируем в чат
+    private _chatMessage = format ["%1 ёбнул %2 с помощью %3 с %4м", _killerName, _victimName, _weaponName, _distance];
+    if (_headshotText != "") then { _chatMessage = _chatMessage + " В БАШНЮ!" };
+    systemChat _chatMessage;
+    
+    // Обновляем отображение (исправленный цикл)
+    [] spawn {
+        disableSerialization;
+        private _startTime = time;
+        waitUntil {
+            call KillFeed_Display;
+            sleep 0.1;
+            (time - _startTime) > (["Duration"] call KillFeed_GetSetting) || 
+            (missionNamespace getVariable ["KillFeed_Messages", []]) isEqualTo []
+        };
+    };
+}];
